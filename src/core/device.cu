@@ -165,6 +165,19 @@ IDXGIAdapter3* budget_adapter(int device) {
     if (FAILED(factory->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter3), (void**) &adapter))) adapter = nullptr;
     factory->Release();
     adapters[device] = adapter;
+    // STRATA_WDDM_RESERVE_MIB=N (opt-in): ask Windows to keep at least N MiB of this card in this process' budget, at the
+    // expense of the others' (IDXGIAdapter3::SetVideoMemoryReservation).  Windows grants what is available; the budget
+    // that results is what mem_get_info() below counts within (STRATA_WDDM_LOG=1 shows it).
+    if (adapter != nullptr) {
+        const char* v = std::getenv("STRATA_WDDM_RESERVE_MIB");
+        if (v != nullptr && std::atoi(v) > 0) {
+            const HRESULT hr = adapter->SetVideoMemoryReservation(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
+                                                                 (UINT64) std::atoi(v) << 20);
+            std::fprintf(stderr, "strata: asked Windows to keep %d MiB of the card in this process' budget "
+                                 "(STRATA_WDDM_RESERVE_MIB): %s\n",
+                         std::atoi(v), SUCCEEDED(hr) ? "accepted" : "refused");
+        }
+    }
     return adapter;
 }
 }  // namespace
