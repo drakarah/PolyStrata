@@ -203,9 +203,28 @@ hipError_t mem_get_info(size_t* free_bytes, size_t* total_bytes) {
     }
     IDXGIAdapter3* adapter = budget_adapter(device);
     DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-    if (adapter == nullptr || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) ||
-        local.Budget == 0 || local.Budget >= *total_bytes)
+    if (adapter == nullptr || FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)))
         return e;
+    // STRATA_WDDM_LOG=1 (opt-in, diagnostic): a line whenever the card's free VRAM, the budget, this process' usage or
+    // what it holds in the shared (system memory) segment has moved by 64 MiB since the last one.  Shows what crosses
+    // the budget, and when, as the engine loads and reads a long prompt.  Changes no figure.
+    static const bool log_on = [] {
+        const char* v = std::getenv("STRATA_WDDM_LOG");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (log_on) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO shared{};
+        if (FAILED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &shared))) shared = {};
+        static std::atomic<unsigned long long> last{~0ull};
+        const unsigned long long key = ((unsigned long long) *free_bytes >> 26) | (local.Budget >> 26) << 12 |
+                                       (local.CurrentUsage >> 26) << 24 | (shared.CurrentUsage >> 26) << 36;
+        if (last.exchange(key) != key)
+            std::fprintf(stderr, "strata: vram: device free %llu MiB, Windows budget %llu, this process %llu, shared "
+                                 "segment %llu (STRATA_WDDM_LOG)\n",
+                         (unsigned long long) (*free_bytes >> 20), (unsigned long long) (local.Budget >> 20),
+                         (unsigned long long) (local.CurrentUsage >> 20), (unsigned long long) (shared.CurrentUsage >> 20));
+    }
+    if (local.Budget == 0 || local.Budget >= *total_bytes) return e;
     const size_t withheld = *total_bytes - (size_t) local.Budget;   // the desktop's and other programs' share
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) {
