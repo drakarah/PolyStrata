@@ -1349,6 +1349,28 @@ static bool s26_tsum_on() {
     return on;
 }
 
+// gfx1010 (RX 5700 XT), dense Q8_0 at 2-4 columns: warp 0's NCOLS x ROWS sums as the transposed butterfly (STRATA_TSUM's kernel, bitwise the
+// same outputs) by default: 2-12% faster on every dense shape of a Q8_0-projection model measured (q_bench, 200 iterations, 3 passes; the
+// PR text has the table).  STRATA_TSUM=0 keeps the per-output warp sums there; STRATA_TSUM=1 still turns the butterfly on for every card
+// and format.  Other cards and formats are unchanged.
+static bool tsum_q8_default() {
+#if defined(__HIPCC__)
+    static const bool off = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '0'; }();
+    if (off) return false;
+    static int cls[16];   // 0 unknown, 1 no, 2 gfx1010
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
+    if (cls[dev] == 0) {
+        cudaDeviceProp p;
+        cls[dev] = cudaGetDeviceProperties(&p, dev) == cudaSuccess && strata::kernels::gfx_arch_is(p.gcnArchName, "gfx1010") ? 2 : 1;
+        (void) cudaGetLastError();
+    }
+    return cls[dev] == 2;
+#else
+    return false;
+#endif
+}
+
 // S26 STRATA_LFUSE (PAIR): blocks n_out.. compute the same rows of w2 into y2 (two matrices of one shape on one
 // input in one launch; each output's code is the single matrix's)
 template<typename F, int NCOLS, int NW, int ROWS, bool TS = false, bool PAIR = false>
@@ -1667,6 +1689,7 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
         return;
     }
     const dim3 threads(WARP, WARPS);
+    const bool ts = s26_tsum_on() || (std::is_same<F, SmallTraits<Q80Block, 8>>::value && tsum_q8_default());
     // the PAIR arguments, unused here (launch_pdl passes every parameter)
     const typename F::Block* const no_w2 = nullptr;
     float* const no_y2 = nullptr;
@@ -1677,13 +1700,13 @@ void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in,
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     }();
     if ((rows1 || q8_0_rows1<F>(n_in, n_out)) && n_in / F::DIV >= F::BPI) {
-        if (s26_tsum_on()) launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
+        if (ts) launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, true, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
         else launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, 1, false, false>, dim3(unsigned(n_out)), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
         return;
     }
     constexpr int ROWS = 2;
     const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
-    if (s26_tsum_on()) launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, true, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
+    if (ts) launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, true, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
     else launch_pdl(native_mmvq_multi_kernel<F, NCOLS, WARPS, ROWS, false, false>, dim3(blocks), threads, 0, s, w, x, y, n_in, n_out, no_w2, no_y2);
 }
 

@@ -21,11 +21,11 @@ namespace K = strata::kernels;
 
 namespace {
 struct Shape { const char* what; int n_in, n_out; };
-const Shape SHAPES[] = {
-    {"GDN qkv 2560->10240", 2560, 10240},  {"GDN gate 2560->6144", 2560, 6144}, {"GDN/QSA out 6144->2560", 6144, 2560},
-    {"QSA q 2560->12288", 2560, 12288},    {"QSA k/v 2560->512", 2560, 512},    {"HC down 10240->320", 10240, 320},
-    {"HC up 320->10240", 320, 10240},      {"shared gate/up 2560->640", 2560, 640}, {"shared down 640->2560", 640, 2560},
-    {"head 2560->248320", 2560, 248320},
+const Shape SHAPES[] = {   // Tiel Coder 35B-A3B (hidden 2048): every dense projection is Q8_0
+    {"attn q / GDN qkv 2048->8192", 2048, 8192}, {"GDN z 2048->4096", 2048, 4096},
+    {"attn o / GDN out 4096->2048", 4096, 2048}, {"attn k/v 2048->512", 2048, 512},
+    {"shared gate/up 2048->512", 2048, 512},     {"shared down 512->2048", 512, 2048},
+    {"head 2048->248320", 2048, 248320},
 };
 void ck(cudaError_t e, const char* w) {
     if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(e)); std::exit(1); }
@@ -95,6 +95,11 @@ int main(int argc, char** argv) {
             ck(cudaEventSynchronize(e1), "sync");
             float ms = 0;
             cudaEventElapsedTime(&ms, e0, e1);
+            std::vector<uint32_t> yh((size_t) s.n_out * c);   // FNV-1a of the output bits: equal hashes = bitwise equal outputs
+            ck(cudaMemcpy(yh.data(), y, yh.size() * 4, cudaMemcpyDeviceToHost), "y copy");
+            uint64_t hsh = 1469598103934665603ull;
+            for (uint32_t v : yh) { hsh ^= v; hsh *= 1099511628211ull; }
+            std::printf("  hash %d cols %016llx\n", c, (unsigned long long) hsh);
             const double us = 1000.0 * ms / iters, gbs = bytes / (us * 1e3);
             std::printf("  %d col%s: %8.1f us  %7.1f GB/s%s\n", c, c == 1 ? " " : "s", us, gbs,
                         bw > 0 ? (" = " + std::to_string((int) (100 * gbs / bw + 0.5)) + "% of bw").c_str() : "");
