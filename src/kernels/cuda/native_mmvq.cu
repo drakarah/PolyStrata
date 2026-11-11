@@ -1794,6 +1794,53 @@ __global__ void native_mmvq_slots_warp_kernel(S slots, int n_in, int n_out) {
     }
 }
 
+// STRATA_SLOTS_WARP4=1 (opt-in): native_mmvq_slots_kernel for a row of several blocks that WARPS warps of one block share (a Q4_K
+// gate/up row of 2048 values is 8 blocks of 16 lanes = 128 lanes; a Q6_K down row of 512 is 2 blocks of 32 lanes = 64), where the
+// block kernel's one barrier and shared-memory reduction cost more than the row's few bytes.  One warp takes the row: lane l does
+// what lane l of each of the block kernel's WARPS warps did (the same items, the same order within a lane), and adds the WARPS
+// partials in the order the block kernel does ((t0 + t1) + t2 + t3), then the same warp_sum: every output is the same bits.
+template<typename F, int ROWS, typename S>
+__launch_bounds__(WARPS * WARP)
+__global__ void native_mmvq_slots_warp4_kernel(S slots, int n_in, int n_out) {
+    const SlotPtrs at = slot_ptrs(slots, int(blockIdx.y));
+    const auto* w = static_cast<const typename F::Block*>(at.w);
+    const auto* x = static_cast<const Q81Block*>(at.x);
+    float* y = at.y;
+    const int lane = int(threadIdx.x);
+    const int row0 = ROWS * (int(blockIdx.x) * WARPS + int(threadIdx.y));
+    if (row0 >= n_out) return;   // whole warps: no barrier
+    const int blocks_per_row = n_in / F::DIV;
+    float t[ROWS][WARPS] = {};
+#pragma unroll
+    for (int p = 0; p < WARPS; ++p) {
+        const int tid = WARP * p + lane;
+        const int kqs = F::kqs(tid);
+        for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += F::BPI) {
+            const int kby = kbx * F::KBY;
+#pragma unroll
+            for (int i = 0; i < ROWS; ++i) {
+                if (row0 + i < n_out) {
+                    const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                    t[i][p] += F::apply(F::load(w + block, kqs), x + kby, kqs);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+        float v = t[i][0];
+#pragma unroll
+        for (int p = 1; p < WARPS; ++p) v += t[i][p];
+        v = warp_sum(v);
+        if (lane == i && row0 + i < n_out) y[row0 + i] = v;
+    }
+}
+
+bool slots_warp4_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_SLOTS_WARP4"); return v && v[0] == '1'; }();
+    return on;
+}
+
 template<typename F, typename S>
 void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s) {
     const dim3 threads(WARP, WARPS);
@@ -1806,6 +1853,12 @@ void launch_slots(const S& slots, int count, int n_in, int n_out, cudaStream_t s
             const dim3 blocks(unsigned((std::size_t(n_out) + ROWS * WARPS - 1) / (ROWS * WARPS)), unsigned(count));
             native_mmvq_slots_warp_kernel<F, ROWS, S, 1><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
         }
+        return;
+    }
+    if (slots_warp4_on() && n_in % F::DIV == 0 && n_in / F::DIV <= F::BPI && n_in / F::DIV * F::T > WARP) {
+        constexpr int ROWS = 2;
+        const dim3 blocks(unsigned((std::size_t(n_out) + ROWS * WARPS - 1) / (ROWS * WARPS)), unsigned(count));
+        native_mmvq_slots_warp4_kernel<F, ROWS, S><<<blocks, threads, 0, s>>>(slots, n_in, n_out);
         return;
     }
     if (n_in / F::DIV < F::BPI) {

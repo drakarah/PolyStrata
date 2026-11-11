@@ -47,24 +47,45 @@ int main(int argc, char** argv) {
     std::vector<int> cols = {1, 2, 3, 4, 6};
     int iters = 50;
     double bw = 0;
+    int qtype = 8, qk = 32, qbytes = 34;   // --type: 8 Q8_0, 12 Q4_K, 13 Q5_K, 14 Q6_K
+    int slots_m = 0;                       // --slots M: also time native_mmvq_slots over M of the copies, 1 column
+    std::vector<Shape> custom;             // --shape n_in,n_out (repeatable): these instead of the table
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--cols" && i + 1 < argc) cols = ints(argv[++i]);
         else if (a == "--iters" && i + 1 < argc) iters = std::atoi(argv[++i]);
         else if (a == "--bw" && i + 1 < argc) bw = std::atof(argv[++i]);
+        else if (a == "--slots" && i + 1 < argc) slots_m = std::atoi(argv[++i]);
+        else if (a == "--type" && i + 1 < argc) {
+            qtype = std::atoi(argv[++i]);
+            if (qtype == 12) { qk = 256; qbytes = 144; }
+            else if (qtype == 13) { qk = 256; qbytes = 176; }
+            else if (qtype == 14) { qk = 256; qbytes = 210; }
+        } else if (a == "--shape" && i + 1 < argc) {
+            const std::vector<int> v = ints(argv[++i]);
+            static std::vector<std::string> names;
+            names.push_back(std::to_string(v[0]) + "->" + std::to_string(v[1]));
+            custom.push_back({names.back().c_str(), v[0], v[1]});
+        }
     }
     cudaDeviceProp prop;
     ck(cudaGetDeviceProperties(&prop, 0), "props");
     std::printf("q8_gemv_bench: %s\n", prop.name);
     std::mt19937 rng(7);
-    for (const Shape& s : SHAPES) {
-        const size_t bytes = (size_t) s.n_out * (s.n_in / 32) * 34;
+    std::vector<Shape> table(std::begin(SHAPES), std::end(SHAPES));
+    if (!custom.empty()) table = custom;
+    for (const Shape& s : table) {
+        const size_t bytes = (size_t) s.n_out * (s.n_in / qk) * qbytes;
         const int copies = (int) std::max<size_t>(1, std::min<size_t>(16, ((size_t) 512 << 20) / bytes));
         std::vector<uint8_t> host(bytes);
-        for (size_t b = 0; b < bytes; b += 34) {   // fp16 scale 0.01 (0x211f), then random int8 weights
-            host[b] = 0x1f;
-            host[b + 1] = 0x21;
-            for (int k = 0; k < 32; ++k) host[b + 2 + k] = (uint8_t) (rng() & 0xff);
+        if (qtype == 8) {
+            for (size_t b = 0; b < bytes; b += 34) {   // fp16 scale 0.01 (0x211f), then random int8 weights
+                host[b] = 0x1f;
+                host[b + 1] = 0x21;
+                for (int k = 0; k < 32; ++k) host[b + 2 + k] = (uint8_t) (rng() & 0xff);
+            }
+        } else {
+            for (auto& v : host) v = (uint8_t) (rng() & 0xff);   // the timing does not depend on the values
         }
         std::vector<void*> w(copies);
         for (auto& p : w) {
@@ -88,9 +109,9 @@ int main(int argc, char** argv) {
         std::printf("\n%s: %.2f MB, %d copies\n", s.what, bytes / 1e6, copies);
         for (int c : cols) {
             K::native_quantize_q8_1(x, xq, s.n_in, c, st);
-            for (int i = 0; i < 3; ++i) K::native_mmvq(8, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
+            for (int i = 0; i < 3; ++i) K::native_mmvq(qtype, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
             cudaEventRecord(e0, st);
-            for (int i = 0; i < iters; ++i) K::native_mmvq(8, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
+            for (int i = 0; i < iters; ++i) K::native_mmvq(qtype, w[i % copies], xq, y, s.n_in, s.n_out, c, st);
             cudaEventRecord(e1, st);
             ck(cudaEventSynchronize(e1), "sync");
             float ms = 0;
@@ -98,6 +119,30 @@ int main(int argc, char** argv) {
             const double us = 1000.0 * ms / iters, gbs = bytes / (us * 1e3);
             std::printf("  %d col%s: %8.1f us  %7.1f GB/s%s\n", c, c == 1 ? " " : "s", us, gbs,
                         bw > 0 ? (" = " + std::to_string((int) (100 * gbs / bw + 0.5)) + "% of bw").c_str() : "");
+        }
+        if (slots_m > 0 && slots_m <= (int) w.size() && slots_m <= K::kMmvqSlotsMax) {
+            K::MmvqSlots sl{};
+            float* ys = nullptr;
+            ck(cudaMalloc(&ys, (size_t) slots_m * s.n_out * 4), "slots y");
+            K::native_quantize_q8_1(x, xq, s.n_in, 1, st);
+            for (int j = 0; j < slots_m; ++j) { sl.w[j] = w[j]; sl.x[j] = xq; sl.y[j] = ys + (size_t) j * s.n_out; }
+            const bool ok = K::native_mmvq_slots(qtype, sl, slots_m, s.n_in, s.n_out, st);
+            for (int i = 0; i < 3; ++i) K::native_mmvq_slots(qtype, sl, slots_m, s.n_in, s.n_out, st);
+            cudaEventRecord(e0, st);
+            for (int i = 0; i < iters; ++i) K::native_mmvq_slots(qtype, sl, slots_m, s.n_in, s.n_out, st);
+            cudaEventRecord(e1, st);
+            ck(cudaEventSynchronize(e1), "sync slots");
+            float ms = 0;
+            cudaEventElapsedTime(&ms, e0, e1);
+            const double us = 1000.0 * ms / iters;
+            std::printf("  slots %d x 1 col: %8.1f us a launch, %6.2f us a slot, %7.1f GB/s%s\n", slots_m, us, us / slots_m,
+                        slots_m * bytes / (us * 1e3), ok ? "" : " (no slots kernel for this type)");
+            std::vector<uint32_t> yh((size_t) slots_m * s.n_out);   // FNV-1a of the output bits: equal hashes = bitwise equal outputs
+            ck(cudaMemcpy(yh.data(), ys, yh.size() * 4, cudaMemcpyDeviceToHost), "slots y copy");
+            uint64_t hsh = 1469598103934665603ull;
+            for (uint32_t v : yh) { hsh ^= v; hsh *= 1099511628211ull; }
+            std::printf("  slots hash %016llx\n", (unsigned long long) hsh);
+            cudaFree(ys);
         }
         for (auto p : w) cudaFree(p);
         cudaFree(x);
