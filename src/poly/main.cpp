@@ -1105,6 +1105,9 @@ void usage() {
                  "  --lock-experts         lock the experts outside VRAM in RAM, so the system cannot drop them from the\n"
                  "                         file cache when other programs want the memory (Linux: up to ulimit -l)\n"
                  "  --prompt-batch N       prompt tokens read at a time (default 1024); about 1.4 MiB of VRAM each\n"
+                 "  --long-prompt-batch N  with --vram-pool (Qwen3.x): a long prompt is read N tokens at a time on VRAM the expert\n"
+                 "                         cache lends while it is read; --prompt-batch is then the batch of everything else\n"
+                 "  --long-prompt-min N    the prompt tokens that make a prompt long for --long-prompt-batch (default 1150)\n"
                  "  --stage-mib N          VRAM the experts outside the cache pass through in a prompt batch (default\n"
                  "                         128 on an NVIDIA card where a longer read widens it, else 2048; never more\n"
                  "                         than a layer's experts take); with less, more of them are copied after the\n"
@@ -1239,6 +1242,8 @@ int main(int argc, char** argv) {
         else if (a == "--check-batch") check = std::atoi(val());
         else if (a == "--draft-vocab") o.draft_vocab = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
+        else if (a == "--long-prompt-batch") o.long_prompt_batch = std::atoi(val());
+        else if (a == "--long-prompt-min") o.long_prompt_min = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());

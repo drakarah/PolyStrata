@@ -14,6 +14,7 @@
 // memory, and the next one goes on from them.
 #pragma once
 
+#include "lend_arena.hpp"
 #include "cpu_experts.hpp"
 
 #include <atomic>
@@ -65,6 +66,12 @@ struct Options {
     bool dump = false;            ///< print a checksum of every stage, for comparing against llama.cpp
     // A prompt batch.  More tokens a call and a larger staging buffer read a prompt faster, and both take VRAM
     // that the expert cache, and so decoding, does without.
+    int long_prompt_min = 1150;   ///< the prompt tokens a read needs to count as a long prompt (long_prompt_batch)
+    int long_prompt_batch = 0;    ///< --long-prompt-batch N (opt-in, needs vram_pool and an architecture that lends,
+                                  ///< Qwen3.x): a prompt of long_prompt_min tokens or more is read in calls of N tokens,
+                                  ///< with the expert cache lending the VRAM of their scratch while it is read and taking
+                                  ///< it back after.  prompt_batch is then the batch of everything else: decode and the
+                                  ///< short reads keep the small scratch, and the experts the rest of it would take.
     int prompt_batch = 1024;      ///< prompt tokens one eval() takes; the scratch is about 1.4 MiB of VRAM a token
     int stage_mib = 0;            ///< the buffer the experts that are not cached pass through, never more than a
                                   ///< layer's experts take; 0: 128 where a read can widen it (stage_read_mib) on
@@ -412,6 +419,11 @@ protected:
     virtual void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) = 0;
     /// The scratch of the architecture's own kernels, a fbuf() each.  Called twice: the first time only counts.
     virtual void assign_scratch() = 0;
+    /// Whether the buffers that grow with rows_ are all assign_scratch()'s and shared_scratch()'s and the few alloc()
+    /// makes after them: then a prompt may be read with more rows than these were made for (Options::long_prompt_batch).
+    virtual bool lends() const { return false; }
+    /// The pointers assign_scratch() sets that grow with rows_, for lend_begin() to save and put back.
+    virtual void row_buffers(PtrSet& v) { (void) v; }
     /// The widest input lin() gets, beside the model's width and the FFNs'.
     virtual int widest() const = 0;
     /// The copies of a token's embedding a layer's input starts from.
@@ -509,6 +521,13 @@ protected:
     void load_moe(int il, bool shared = true);
     void alloc();
     void shared_scratch();
+    /// The rows a prompt batch's buffers must hold: the larger of rows_ and Options::long_prompt_batch (the buffers that live
+    /// the whole run: the recurrent state's draft rows, the rotary positions, the pinned ones).
+    int row_cap() const;
+    /// A long prompt's larger batch of scratch in lend_map_, VRAM the expert cache lends (see Options::long_prompt_batch).
+    bool lend_begin(int n);
+    void lend_end();
+    size_t alloc_lent(bool real);
     float* draft_input(const int32_t* tokens, int64_t row, const float* h, int n);
     void draft_rows(const int32_t* tokens, int first, int n);
     void guess_block(int32_t token);
@@ -546,6 +565,9 @@ protected:
     void embed(int32_t token, float* dst) const;
     void dbg(const char* name, int il, const float* dev, int n);
     float* fbuf(size_t n);
+    /// fbuf() for a buffer that does not grow with rows_: while a lent set is laid out (alloc_lent()) it is the base
+    /// set's, which is there already.  `member` is the pointer the buffer is for.
+    float* fbuf_keep(float** member, size_t n);
     int room(int n) const;
     int room_key(int n) const;
     void* dmalloc(size_t bytes, const char* what);
@@ -794,6 +816,18 @@ protected:
     float *g_ = nullptr, *u_ = nullptr, *h_ = nullptr, *d_ = nullptr, *rl_ = nullptr,
           *logits_ = nullptr;
     void *xq_ = nullptr, *q8_ = nullptr;
+    // Options::long_prompt_batch: the lent set of the buffers that grow with rows_
+    Mapped lend_map_;                  ///< its VRAM, mapped from the pool while a prompt is read
+    bool lend_active_ = false;         ///< the members point into lend_map_ and rows_ is the long-prompt batch
+    bool lend_pass_ = false;           ///< alloc_lent() is laying the set out (fbuf_keep())
+    LendArena lend_arena_;             ///< the lent buffers, counted and then laid out
+    PtrSet lend_set_;                  ///< the members that point at a set of them, and what they held
+    size_t lend_cut_ = 0;              ///< what the expert cache gave up for it (it takes it back)
+    int small_rows_ = 0, small_read_rows_ = 0;
+    int lend_qmax_ = 0;                ///< alloc()'s q_max, for the lent xq_/q8_/mqx_
+    bool lend_mixed_ = false;          ///< alloc()'s mixed_tiles
+    float* lend_scratch_ = nullptr;
+    size_t lend_scratch_at_ = 0;
 
     // pinned host buffers
     float *h_r_ = nullptr, *h_rl_ = nullptr, *h_x_ = nullptr, *h_cpu_ = nullptr, *h_logits_ = nullptr;

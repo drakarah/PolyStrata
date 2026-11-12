@@ -190,8 +190,8 @@ void Qwen35::alloc_caches() {
     const size_t fewest = mask_ >= 0 ? std::min(opt_.window, rows_) : 1;
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), fewest, (size_t) rows_);
     if (axes_) return;   // bind(): a call's scratch is every sequence's
-    axes_ = (int32_t*) dmalloc((size_t) rows_ * 3 * sizeof(int32_t), "a call's rotary positions");
-    h_axes_.resize((size_t) rows_ * 3);
+    axes_ = (int32_t*) dmalloc((size_t) row_cap() * 3 * sizeof(int32_t), "a call's rotary positions");
+    h_axes_.resize((size_t) row_cap() * 3);
 }
 
 // Per-token buffers hold rows_ tokens, row after row.
@@ -214,12 +214,12 @@ void Qwen35::assign_scratch() {
     if (!opt_.metal_balanced)
 #endif
     {
-        score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
+        score_ = fbuf_keep(&score_, (size_t) chunk_ * n_head_ * opt_.max_context);
         if (rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
         if (rows_ >= kStageRows && opt_.kv_format == KvFmt::kQ8_0) {
             // the K and V blocks a q8 prompt batch dequantizes, side by side; work_halves_ halves each
             work_halves_ = kQ8WorkRows * (size_t) n_kv_ * head_dim_;
-            q8w_ = fbuf((2 * work_halves_ + 1) / 2);
+            q8w_ = fbuf_keep(&q8w_, (2 * work_halves_ + 1) / 2);
         }
     }
     if (gdn_mma_.initialize([&] {

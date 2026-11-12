@@ -32,6 +32,25 @@ protected:
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
     void alloc_caches() override;
     void assign_scratch() override;
+    bool lends() const override { return true; }
+    void row_buffers(PtrSet& v) override {
+        v.add(&proj_);
+        v.add(&qkv_);
+        v.add(&z_);
+        v.add(&alpha_);
+        v.add(&beta_);
+        v.add(&gated_);
+        v.add(&qg_);
+        v.add(&q_);
+        v.add(&kraw_);
+        v.add(&k_);
+        v.add(&v_);
+        v.add(&att_);
+        v.add(&score_);
+        v.add(&sg_);
+        v.add(&awork_);
+        v.add(&q8w_);
+    }
     int widest() const override;
     int streams() const override { return 1; }
     void layer_head(Layer& L, int il, int n) override;

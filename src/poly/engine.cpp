@@ -2965,10 +2965,10 @@ void Engine::shared_scratch() {
     g_ = fbuf(ff);   // a routed expert's gate and up rows come out of one launch, back to back
     u_ = fbuf(ff);
     h_ = fbuf(ff);
-    d_ = fbuf((size_t) card_rows() * n_embd_);   // the routed experts of a few tokens, until they are added up
+    d_ = fbuf_keep(&d_, (size_t) card_rows() * n_embd_);   // the routed experts of a few tokens, until they are added up
     rl_ = fbuf(n * n_expert_);
-    logits_ = fbuf((size_t) n_vocab_);
-    if (rows_ >= kStageRows && bf16_max_ > 0) wf_ = fbuf(bf16_max_);   // a BF16 matrix as floats, for lin()
+    logits_ = fbuf_keep(&logits_, (size_t) n_vocab_);
+    if (rows_ >= kStageRows && bf16_max_ > 0) wf_ = fbuf_keep(&wf_, bf16_max_);   // a BF16 matrix as floats, for lin()
     if (mmq_) {
         const size_t rr = n * n_used_;
         gu_ = fbuf(rr * 2 * n_ff_exp_);
@@ -2986,7 +2986,12 @@ void Engine::alloc() {
     read_rows_ = rows_ < kStageRows ? rows_ : std::max(rows_, (int) most / rows_ * rows_);
     rec_n_ = recurrent_floats();
     state_n_ = rec_n_ + (draft_ ? (size_t) n_embd_ : 0);
-    const size_t state_floats = state_n_ + (draft_ ? (size_t) rows_ * n_embd_ : 0);
+    if (opt_.long_prompt_batch > 0 && (!lends() || !pool_on_ || opt_.dump || split_ || opt_.batch > 0 || !long_batch_valid(opt_.long_prompt_batch, opt_.prompt_batch))) {
+        std::fprintf(stderr, "strata-poly: --long-prompt-batch %d is ignored: it needs --vram-pool, one card, no --batch slots, an architecture that lends "
+                             "(Qwen3.x) and a batch above --prompt-batch, up to 4096\n", opt_.long_prompt_batch);
+        opt_.long_prompt_batch = 0;
+    }
+    const size_t state_floats = state_n_ + (draft_ ? (size_t) row_cap() * n_embd_ : 0);
     state_ = (float*) dmalloc(state_floats * sizeof(float), "the recurrent state");
     if (draft_) {
         hn_ = state_ + rec_n_;
@@ -3050,13 +3055,16 @@ void Engine::alloc() {
     xq_ = dmalloc(n * kernels::native_q8_1_bytes(n_embd_), "scratch");
     q8_ = dmalloc(n * kernels::native_q8_1_bytes((q_max + 255) / 256 * 256), "scratch");
 
-    h_r_ = (float*) hmalloc(n * streams() * n_embd_ * sizeof(float), "pinned memory");
+    const size_t nh = (size_t) row_cap();   // the pinned buffers have the rows of a lent long-prompt batch too
+    lend_qmax_ = q_max;
+    lend_mixed_ = mixed_tiles;
+    h_r_ = (float*) hmalloc(nh * streams() * n_embd_ * sizeof(float), "pinned memory");
     const size_t at_rows = (size_t) std::max(opt_.window, opt_.batch + 1);   // window()'s tokens, step()'s
     at_ = (long long*) dmalloc(at_rows * 2 * sizeof(long long), "scratch");
     h_at_ = (long long*) hmalloc(at_rows * 2 * sizeof(long long), "pinned memory");
-    h_rl_ = (float*) hmalloc(n * n_expert_ * sizeof(float), "pinned memory");
-    h_x_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
-    h_cpu_ = (float*) hmalloc(n * n_embd_ * sizeof(float), "pinned memory");
+    h_rl_ = (float*) hmalloc(nh * n_expert_ * sizeof(float), "pinned memory");
+    h_x_ = (float*) hmalloc(nh * n_embd_ * sizeof(float), "pinned memory");
+    h_cpu_ = (float*) hmalloc(nh * n_embd_ * sizeof(float), "pinned memory");
     h_logits_ = (float*) hmalloc((size_t) n_vocab_ * sizeof(float), "pinned memory");
 
     if (mmq_) {
@@ -3069,10 +3077,10 @@ void Engine::alloc() {
         mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
         d_ids_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
         d_wts_ = (float*) dmalloc(rr * sizeof(float), "scratch");
-        h_ids_ = (int32_t*) hmalloc(rr * sizeof(int32_t), "pinned memory");
+        h_ids_ = (int32_t*) hmalloc(nh * n_used_ * sizeof(int32_t), "pinned memory");
         d_slots_ = (void**) dmalloc((size_t) n_layer_ * n_expert_ * sizeof(void*), "scratch");
         tab_ = (int32_t*) dmalloc(tab, "scratch");
-        h_tab_ = (int32_t*) hmalloc(tab, "pinned memory");
+        h_tab_ = (int32_t*) hmalloc(tab + 3 * (nh - n) * n_used_ * sizeof(int32_t), "pinned memory");
         iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
         std::vector<int32_t> ramp(rr);
         std::iota(ramp.begin(), ramp.end(), 0);
@@ -3114,7 +3122,7 @@ void Engine::alloc() {
         cudaStream_t up = nullptr;
         ck(cudaStreamCreateWithFlags(&up, cudaStreamNonBlocking), "cudaStreamCreate");
         up_ = up;
-        ids_.resize(rr);
+        ids_.resize(nh * n_used_);   // a lent long-prompt batch routes more rows
         first_.resize((size_t) n_expert_);
 
         for (void** e : {&ev_in_[0], &ev_in_[1], &ev_out_[0], &ev_out_[1]}) {   // read()
@@ -4671,6 +4679,165 @@ void* Engine::record(F&& work) {
     return exec;
 }
 
+
+int Engine::row_cap() const { return std::max(rows_, std::min(opt_.long_prompt_batch, (int) opt_.max_context)); }
+
+// fbuf() for a buffer that does not grow with rows_ (the attention's scores, the BF16 matrix as floats, the logits):
+// while a lent set is laid out it is the base set's, which exists already and is not used at the same time.
+float* Engine::fbuf_keep(float** member, size_t n) {
+    if (lend_pass_)
+        if (void* kept = lend_set_.saved(reinterpret_cast<void**>(member))) return static_cast<float*>(kept);
+    return fbuf(n);
+}
+
+// The device buffers that grow with rows_, made again for rows_ = Options::long_prompt_batch, as alloc() made them for the
+// base batch: the shared and the architecture's scratch, the quantized inputs and the MMQ rows.  `real` false counts
+// (the pointers it leaves are not to be used).  Returns the bytes.
+size_t Engine::alloc_lent(bool real) {
+    struct Pass {
+        bool& on;
+        explicit Pass(bool& f) : on(f) { on = true; }
+        ~Pass() { on = false; }
+    } pass(lend_pass_);
+    if (real) lend_arena_.lay_out((uintptr_t) lend_map_.base, lend_map_.mapped);
+    else lend_arena_.count();
+    const size_t n = (size_t) rows_;
+    scratch_ = nullptr;
+    scratch_at_ = 0;
+    shared_scratch();
+    assign_scratch();
+    scratch_ = (float*) lend_arena_.alloc(scratch_at_ * sizeof(float));
+    scratch_at_ = 0;
+    shared_scratch();
+    assign_scratch();
+    xq_ = lend_arena_.alloc(n * kernels::native_q8_1_bytes(n_embd_));
+    q8_ = lend_arena_.alloc(n * kernels::native_q8_1_bytes((lend_qmax_ + 255) / 256 * 256));
+    if (mmq_) {
+        const size_t rr = n * n_used_,
+                     tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1) +
+                            2 * kMaxStagedTiles * (2 * (size_t) n_expert_ + 2)) * sizeof(int32_t);
+        mq_ = lend_arena_.alloc(Mmq::q8_bytes((int64_t) rr, n_embd_));
+        mq2_ = lend_arena_.alloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_));
+        if (lend_mixed_) mqu_ = lend_arena_.alloc(Mmq::q8_bytes((int64_t) rr, n_embd_));
+        mqx_ = lend_arena_.alloc(Mmq::q8_bytes(rows_, lend_qmax_));
+        d_ids_ = (int32_t*) lend_arena_.alloc(rr * sizeof(int32_t));
+        d_wts_ = (float*) lend_arena_.alloc(rr * sizeof(float));
+        tab_ = (int32_t*) lend_arena_.alloc(tab);
+        iota_ = (int32_t*) lend_arena_.alloc(rr * sizeof(int32_t));
+        if (real) {
+            std::vector<int32_t> ramp(rr);
+            std::iota(ramp.begin(), ramp.end(), 0);
+            // on st_, behind the zeroing vmm_map() queued there: a plain cudaMemcpy runs on the legacy stream, which
+            // is not ordered against it, and the zeroing then wipes the table
+            h2d(iota_, ramp.data(), rr * sizeof(int32_t));
+            ck(cudaStreamSynchronize(cs(st_)), "scratch");
+        }
+    }
+    return lend_arena_.used();
+}
+
+// Options::long_prompt_batch: a prompt of n tokens that is long enough is read with a larger batch than the one decode
+// runs with.  The expert cache gives up the VRAM of the larger set (shrink_cache(): the experts it ranks lowest
+// leave, the others keep their slots), the buffers that grow with rows_ are laid out in it, and their members point
+// there until lend_end().  The recorded launches belong to the base batch's buffers and stay as they are
+// (run() records nothing while lend_active_).  False: nothing was done (the prompt is short, the set would take
+// more than half of what the cache and the pool hold, or the card did not give the VRAM).  A failure of the card
+// puts everything back and is thrown.
+bool Engine::lend_begin(int n) {
+    if (!lend_wanted(n, opt_.long_prompt_min, rows_, opt_.long_prompt_batch) || !pool_on_ || !exp_ || lend_active_ ||
+        freeze_experts_ || split_ || next_ || opt_.dump || !lends() || pos_ + n > opt_.max_context)
+        return false;
+    OnCard here(device_, split_);
+    cover(pos_ + n);   // this read's attention rows first: what the pool has left after them may be lent
+    ck(cudaStreamSynchronize(cs(st_)), "the prefill scratch");
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "the prefill scratch");
+    lend_set_.clear();
+    for (void** p : {(void**) &r_, (void**) &cur_, (void**) &xn_, (void**) &ao_, (void**) &fo_, (void**) &g_, (void**) &u_,
+                     (void**) &h_, (void**) &d_, (void**) &rl_, (void**) &logits_, (void**) &wf_, (void**) &gu_,
+                     (void**) &hx_, (void**) &dx_, (void**) &hf_, (void**) &xq_, (void**) &q8_, (void**) &mq_,
+                     (void**) &mq2_, (void**) &mqu_, (void**) &mqx_, (void**) &d_ids_, (void**) &d_wts_, (void**) &tab_,
+                     (void**) &iota_})
+        lend_set_.add(p);
+    row_buffers(lend_set_);
+    lend_set_.save();
+    lend_scratch_ = scratch_;
+    lend_scratch_at_ = scratch_at_;
+    small_rows_ = rows_;
+    small_read_rows_ = read_rows_;
+    // the base batch's members back, whichever way this goes, and what the cache gave up taken back
+    const auto undo = [&] {
+        lend_set_.restore();
+        scratch_ = lend_scratch_;
+        scratch_at_ = lend_scratch_at_;
+        rows_ = small_rows_;
+        read_rows_ = small_read_rows_;
+        if (lend_map_.mapped) vmm_unmap(lend_map_, 0);
+        if (lend_cut_ > 0) {
+            try {
+                grow_cache(lend_cut_, true);
+            } catch (const std::exception&) {
+            }
+        }
+        lend_cut_ = 0;
+        lend_active_ = false;
+    };
+    rows_ = std::min(opt_.long_prompt_batch, (int) opt_.max_context);
+    const size_t most = std::min<size_t>(kReadBytes / ((size_t) streams() * n_embd_ * sizeof(float)), opt_.max_context);
+    read_rows_ = rows_ < kStageRows ? rows_ : std::max(rows_, (int) most / rows_ * rows_);
+    bool done = false;
+    try {
+        const size_t need = up_to(alloc_lent(false) + LendArena::kAlign, pg_);
+        if (need <= (arena_.mapped + vpool_bytes()) / 2) {
+            if (!lend_map_.base) vmm_reserve(lend_map_, need);
+            if (need > lend_map_.reserved) throw std::logic_error("the lent buffers outgrew their addresses");
+            if (vpool_bytes() < need) {
+                const size_t had = arena_.mapped;
+                shrink_cache(need - vpool_bytes());
+                held_is_budget();
+                lend_cut_ = had - arena_.mapped;
+            }
+            try {
+                vmm_map(lend_map_, need, SIZE_MAX, "the prefill scratch");
+                alloc_lent(true);
+                lend_active_ = true;
+                done = true;
+            } catch (const std::runtime_error& e) {
+                if (std::strncmp(e.what(), "no VRAM", 7) != 0) throw;   // the card did not give it: the base batch reads
+            }
+        }
+    } catch (...) {
+        undo();
+        throw;
+    }
+    if (!done) {
+        undo();
+        return false;
+    }
+    std::fprintf(stderr, "strata-poly: long-prompt batch %d for this read of %d tokens: %zu MiB of the expert cache lent\n",
+                 rows_, n, lend_cut_ >> 20);
+    return true;
+}
+
+// The prompt is read: the members are the base batch's again, the lent VRAM goes back to the pool, and the expert
+// cache takes back what it gave up, the most used experts it lacks, which the follower uploads while the answer is
+// written.
+void Engine::lend_end() {
+    if (!lend_active_) return;
+    OnCard here(device_, split_);
+    ck(cudaStreamSynchronize(cs(st_)), "the prefill scratch");
+    if (up_) ck(cudaStreamSynchronize(cs(up_)), "the prefill scratch");
+    lend_set_.restore();
+    scratch_ = lend_scratch_;
+    scratch_at_ = lend_scratch_at_;
+    rows_ = small_rows_;
+    read_rows_ = small_read_rows_;
+    lend_active_ = false;
+    vmm_unmap(lend_map_, 0);
+    staged_il_ = -1;
+    if (lend_cut_ > 0) grow_cache(lend_cut_, true);
+    lend_cut_ = 0;
+}
+
 // n tokens from pos() through every layer.  The sequence is not longer for it: the caller says by how much.
 void Engine::run(const int32_t* tokens, int n) {
     if (n < 1 || n > rows_) throw std::logic_error("eval takes 1 to max_rows() tokens");
@@ -4714,7 +4881,7 @@ void Engine::run(const int32_t* tokens, int n) {
     // What a launch needs of the position it reads at at_; an attention over the rows so far is recorded again
     // when the rows outgrow what it was sized for (head_key()).  A prompt's few tokens are not a window: they
     // leave no snapshots of the recurrent state, so their launches are others.
-    bool replay = opt_.graphs && n <= opt_.window && (windowed_ || block_pass_ || n == 1) && !opt_.dump;
+    bool replay = opt_.graphs && n <= opt_.window && (windowed_ || block_pass_ || n == 1) && !opt_.dump && !lend_active_;
     for (int t = 0; t < n && replay; ++t) replay = !image_at(pos_ + t);
     const auto replayed = [&](std::vector<void*>& made, size_t key, auto&& work) {
         if (made.size() <= key) made.resize(key + 1, nullptr);
@@ -5136,6 +5303,21 @@ bool Engine::read(const int32_t* tokens, int n, const Mark* marks, int n_marks,
     for (int k = 0; k < n_marks; ++k)
         if (marks[k].at <= (k ? marks[k - 1].at : 0) || marks[k].at >= n)
             throw std::logic_error("read: the marks rise, above 0 and below the tokens read");
+
+    // a long prompt reads with Options::long_prompt_batch rows on VRAM the expert cache lends (lend_begin())
+    struct Lend {
+        Engine& e;
+        bool on;
+        Lend(Engine& x, int n_) : e(x), on(x.lend_begin(n_)) {}
+        ~Lend() {
+            if (!on) return;
+            try {
+                e.lend_end();
+            } catch (const std::exception& x) {
+                std::fprintf(stderr, "strata-poly: giving the lent VRAM back: %s\n", x.what());
+            }
+        }
+    } lend(*this, n);
 
     // the calls: up to max_rows() tokens each, and none across a mark
     calls_.clear();
