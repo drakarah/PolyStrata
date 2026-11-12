@@ -92,6 +92,10 @@ inline bool lend_wanted(long long n, long long min_tokens, long long small_rows,
     return long_rows > small_rows && n > small_rows && n >= min_tokens;
 }
 
+// Whether a set of `need` bytes can be borrowed from the `held` bytes the expert cache and the pool's free VRAM have:
+// only that there is that much to take.  No share of the cache is kept back.
+inline bool lend_fits(size_t need, size_t held) { return need > 0 && need <= held; }
+
 // Whether --long-prompt-batch is taken as given: a batch above the small one, up to the largest prompt batch (4096).
 inline bool long_batch_valid(long long long_rows, long long small_rows) {
     return long_rows > small_rows && long_rows <= 4096;

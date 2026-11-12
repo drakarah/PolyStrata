@@ -3131,8 +3131,8 @@ void Engine::alloc() {
         tab_ = (int32_t*) dmalloc(tab, "scratch");
         h_tab_ = (int32_t*) hmalloc(tab + 3 * (nh - n) * n_used_ * sizeof(int32_t), "pinned memory");
         iota_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
-        d_ex_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
-        h_ex_ = (int32_t*) hmalloc(rr * sizeof(int32_t), "pinned memory");
+        d_ex_ = (int32_t*) dmalloc(nh * n_used_ * sizeof(int32_t), "scratch");   // a lent long-prompt batch has more rows
+        h_ex_ = (int32_t*) hmalloc(nh * n_used_ * sizeof(int32_t), "pinned memory");
         std::vector<int32_t> ramp(rr);
         std::iota(ramp.begin(), ramp.end(), 0);
         ck(cudaMemcpy(iota_, ramp.data(), rr * sizeof(int32_t), cudaMemcpyHostToDevice), "scratch");
@@ -4821,7 +4821,7 @@ size_t Engine::alloc_lent(bool real) {
 // leave, the others keep their slots), the buffers that grow with rows_ are laid out in it, and their members point
 // there until lend_end().  The recorded launches belong to the base batch's buffers and stay as they are
 // (run() records nothing while lend_active_).  False: nothing was done (the prompt is short, the set would take
-// more than half of what the cache and the pool hold, or the card did not give the VRAM).  A failure of the card
+// more than the cache and the pool hold, or the card did not give the VRAM).  A failure of the card
 // puts everything back and is thrown.
 bool Engine::lend_begin(int n) {
     if (!lend_wanted(n, opt_.long_prompt_min, rows_, opt_.long_prompt_batch) || !pool_on_ || !exp_ || lend_active_ ||
@@ -4867,7 +4867,7 @@ bool Engine::lend_begin(int n) {
     bool done = false;
     try {
         const size_t need = up_to(alloc_lent(false) + LendArena::kAlign, pg_);
-        if (need <= (arena_.mapped + vpool_bytes()) / 2) {
+        if (lend_fits(need, arena_.mapped + vpool_bytes())) {
             if (!lend_map_.base) vmm_reserve(lend_map_, need);
             if (need > lend_map_.reserved) throw std::logic_error("the lent buffers outgrew their addresses");
             if (vpool_bytes() < need) {

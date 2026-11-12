@@ -268,6 +268,17 @@ void test_lend_wanted() {
     check(!lend_wanted(-5, 0, 256, 2048), "a negative count never borrows");
 }
 
+void test_lend_fits() {
+    using strata::poly::lend_fits;
+    check(lend_fits(100, 100), "the whole of what is held can be borrowed");
+    check(lend_fits(1, 100), "a small set fits");
+    check(!lend_fits(101, 100), "more than there is cannot");
+    check(!lend_fits(0, 100), "nothing to borrow is not a lend");
+    check(!lend_fits(1, 0), "nothing held");
+    check(lend_fits(size_t(858) << 20, size_t(860) << 20), "858 MiB of 860 MiB: yes, no half rule");
+    check(!lend_fits(SIZE_MAX, SIZE_MAX - 1), "no wrap at the top");
+}
+
 void test_long_batch_valid() {
     using strata::poly::long_batch_valid;
     check(!long_batch_valid(0, 256), "off is not valid");
@@ -285,6 +296,7 @@ void test_long_batch_valid() {
 int main() {
     test_lend_wanted();
     test_long_batch_valid();
+    test_lend_fits();
     test_alignment_and_order();
     test_count_matches_lay_out();
     test_overflow();
