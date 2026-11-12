@@ -45,6 +45,8 @@ leaves out.
 | [benchman-ai](https://github.com/simplexai-labs/PolyStrata/pull/127) | RTX 5070 Ti 16 GB | Ryzen 7 5700X3D; 63.9 GiB; Windows 10 | Qwen3.6-35B-A3B UD-Q4_K_M, 0.1.45, `tools/strata_bench.py` | 32K | on, 78% of the guesses kept | 164 in a short chat (134 to 201), 153 in an agent session | 2,158 at 4K, 3,105 at 16K | |
 | [benchman-ai](https://github.com/simplexai-labs/PolyStrata/pull/127) | RTX 5070 Ti 16 GB | Ryzen 7 5700X3D; 63.9 GiB; Windows 10 | DeepSeek V4 Flash UD-IQ2_XXS, 0.1.45, `tools/strata_bench.py` | 32K | 52 of 120 guesses kept | 3.4 in a short chat (2.4 to 3.9), 1.7 in an agent session | 104 at 4K, 129 at 16K | the 90.9 GB file does not fit in 64 GB of RAM: the disk was busy while it wrote |
 | [Hazelhof](https://github.com/simplexai-labs/PolyStrata/pull/134) | 4x RTX 5080 16 GB on a PEX89048 PCIe 5.0 switch, Gen5 x8 each, the layers split over all four | Core Ultra 7 270K Plus; 125.2 GiB DDR5-6400; Linux, CUDA 13.3 | GLM 5.3 Flash GSQ-RCO 3.0bit, main at 2d6a8f9b built from source; 4,652 of 12,384 experts in VRAM | 32K | on, 75% of the guesses kept | 64 in a short chat (51 to 72), 62 in an agent session | 479 at 4K, 573 at 16K | a one-hour soak: 1,621 requests, no failures, decode 69.4 tok/s median in every quarter of the hour |
+| [shindocha](https://github.com/simplexai-labs/PolyStrata/issues/153) | RTX 5060 Ti 16 GB | Xeon E5-2697 v4, 16 threads; 61.8 GiB; Linux 7.0, driver 610.43 | Qwen3.6-35B-A3B UD-Q4_K_XL, 0.1.45 (a82999fd), `tools/strata_bench.py` | 180K, the install's own configuration | not stated | 138 in a short chat (117 to 161), 131 in an agent session | 1,470 at 4K, 2,565 at 16K | |
+| [dontaskmeformyname](https://github.com/simplexai-labs/PolyStrata/pull/156) | RX 7900 XTX 24 GB (gfx1100) | Ryzen 7 7800X3D; 30.6 GiB; CachyOS Linux, the HIP backend | Flint 40B-A2.5B UD-Q3_K_XL, 0.1.45-poly.7 (fabae0d6), `tools/strata_bench.py` | 64K, `--kv-whole` | not stated | 121 in a short chat (114 to 145), 111 in an agent session | 3,496 at 4K, 2,315 at 16K | the first report of Flint on an AMD card; an 8-task agent harness passed every task |
 
 Setup offers Tiel Coder now (`--family tiel`), and not the HauhauCS file. How to give setup such a file is in the
 [FAQ](FAQ.md#can-i-run-a-fine-tune-or-another-model-with-the-same-architecture).
@@ -76,6 +78,10 @@ The official suite on a [GTX 1650 4 GB with Clover APEX-I-NanoPlus](../bench/res
 and [with MiniCPM-V mix_q3gud_im](../bench/results/2026-10-30-community-gtx-1650-minicpm-v-4-7-35b-a3b-mix-q3gud-im/README.md),
 and on an [RTX 3080 10 GB with Tiel Coder UD-Q4_K_XL](../bench/results/2026-10-30-community-rtx-3080-tiel-coder-35b-a3b-ud-q4-k-xl/README.md),
 all three with v0.1.45-poly.6 and per-request data; their rows are in the table above.
+
+The official suite on an [RX 7900 XTX with Flint UD-Q3_K_XL](../bench/results/2026-11-10-community-unknown-flint-40b-a2-5b-ud-q3-k-xl/README.md)
+adds an 8-task agent harness run through Hermes Agent: every task made the right file, and one of them took two
+minutes because the model kept re-reading its input.
 
 ### Comparing with llama.cpp
 

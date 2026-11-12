@@ -1,0 +1,139 @@
+{
+ "label": "flint",
+ "model": "flint-40b-a2.5b-ud-q3_k_xl",
+ "base_url": "http://127.0.0.1:8081/v1",
+ "tasks": [
+  {
+   "task": "terminal_basic",
+   "ok": true,
+   "wall_s": 4.4,
+   "hermes_ms": 3917,
+   "tokens": {
+    "input": 7102,
+    "output": 127,
+    "total": 7229,
+    "cache_read": 3566,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "2026-11-10T00:13:00+01:00",
+   "stderr_tail": ""
+  },
+  {
+   "task": "file_extract",
+   "ok": true,
+   "wall_s": 129.7,
+   "hermes_ms": 129256,
+   "tokens": {
+    "input": 164916,
+    "output": 9706,
+    "total": 174622,
+    "cache_read": 139698,
+    "cache_write": 0
+   },
+   "rc": 1,
+   "final": "Die Aufgabe ist abgeschlossen.\n\n**Was gefunden wurde:**\n- `/home/alex/hermes/projekte/strata/STATUS.md` enthält aktuell die Sektion `## Offene Punkte` (in der neuesten Commit-Revision `374fbfd` hieß sie noch `## Offene Punkte nach Reboot`).\n- Die Sektion „Offene Punkte nach Reboot“ führte exakt **4 Punkte** (im Git-Verlauf, Commit `d0efc45`):\n  - Qwen-Benchmark nachholen (siehe oben)\n  - evtl. --c",
+   "stderr_tail": "Session: local-4fc732291f51e751bf37d5676d3830e81fed6de0363f4740672c1524aa5a5d74\n\nsession_id: local-4fc732291f51e751bf37d5676d3830e81fed6de0363f4740672c1524aa5a5d74\n"
+  },
+  {
+   "task": "search_edit",
+   "ok": true,
+   "wall_s": 5.2,
+   "hermes_ms": 4718,
+   "tokens": {
+    "input": 11239,
+    "output": 344,
+    "total": 11583,
+    "cache_read": 7275,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "ok",
+   "stderr_tail": ""
+  },
+  {
+   "task": "multi_file",
+   "ok": true,
+   "wall_s": 5.4,
+   "hermes_ms": 4960,
+   "tokens": {
+    "input": 11613,
+    "output": 442,
+    "total": 12055,
+    "cache_read": 7527,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "fertig",
+   "stderr_tail": ""
+  },
+  {
+   "task": "error_recovery",
+   "ok": true,
+   "wall_s": 4.9,
+   "hermes_ms": 4477,
+   "tokens": {
+    "input": 14949,
+    "output": 342,
+    "total": 15291,
+    "cache_read": 11164,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "wieder-da",
+   "stderr_tail": ""
+  },
+  {
+   "task": "json_answer",
+   "ok": true,
+   "wall_s": 4.5,
+   "hermes_ms": 4079,
+   "tokens": {
+    "input": 3540,
+    "output": 349,
+    "total": 3889,
+    "cache_read": 0,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "{\"stadt\": \"Aachen\", \"plz\": 52080, \"einwohner\": 260000, \"hochschule\": \"RWTH Aachen\"}",
+   "stderr_tail": ""
+  },
+  {
+   "task": "german_summary",
+   "ok": true,
+   "wall_s": 10.4,
+   "hermes_ms": 9982,
+   "tokens": {
+    "input": 3718,
+    "output": 1268,
+    "total": 4986,
+    "cache_read": 0,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "- PolyStrata ist eine lokale Inferenz-Engine, die grosse Sprachmodelle auf einem einzelnen PC betreibt.\n- Die Engine verteilt Expertengewichte zwischen VRAM und Arbeitsspeicher und nutzt einen Experten-Cache.\n- Spekulative Dekodierung und Kontext-Cache beschleunigen die Ausgabe auf einer Radeon RX 7900 XTX.",
+   "stderr_tail": ""
+  },
+  {
+   "task": "bugfix",
+   "ok": true,
+   "wall_s": 7.5,
+   "hermes_ms": 7080,
+   "tokens": {
+    "input": 20282,
+    "output": 577,
+    "total": 20859,
+    "cache_read": 16103,
+    "cache_write": 0
+   },
+   "rc": 0,
+   "final": "**gruen** – 2 Tests sind erfolgreich. ✅\n\n**Ursache:** In `./calc.py` war in der Funktion `add` ein Tippfehler – sie rechnete `a - b` statt `a + b`.\n\n**Korrektur:** `return a - b` → `return a + b` in `calc.py`.\n\n**Testergebnis:** `python3 test_calc.py` läuft jetzt mit Exit-Code 0 durch und gibt `2 Tests gruen` aus.",
+   "stderr_tail": ""
+  }
+ ],
+ "ok_count": 8,
+ "task_count": 8,
+ "wall_total_s": 172.0,
+ "mean_hermes_ms": 21059
+}

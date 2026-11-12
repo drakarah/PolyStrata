@@ -66,8 +66,30 @@ it, and with the expert cache fixed but guesses on. The tail skip (Qwen3.6's def
 VRAM only where no token of the call ranks it high, so with it a request's text also depends on the others written
 with it.
 
-Not there yet: guesses inside a slot (`--batch-mtp` in the Strata project's engine), `--batch-groups`, and the other
-options of the table below, which are that engine's.
+### Guesses inside the slots (`--batch-mtp`)
+
+Qwen3.6, Ornith 1.5 and Tiel Coder carry a block that guesses the next token (MiniCPM-V's file has none). Alone, a
+request uses it as always. With `--batch-mtp` in the config's `"args"` (or `STRATA_BATCH_MTP=1` in the server's environment) the
+slots that write together use it too, as Basalt and the Strata project's engine do: before each step every slot's
+block guesses the token after its next one, all slots in one pass, and the step takes each slot's token and its
+guess together. Where the guess is what the model picks, the slot gets two tokens from that step; where it is not,
+the slot goes back to the state after its first token. The answers are the ones each request gets alone.
+
+Measured with `--check-batch` (the same tokens as each prompt alone, a Python prompt of 47 tokens, 160 tokens
+written, 94 to 96% of the guesses right), tokens/s of all slots together:
+
+| Machine, model | slots | without | with `--batch-mtp` |
+| --- | ---: | ---: | ---: |
+| RTX PRO 6000 (Linux), Qwen3.6 UD-Q3_K_M, every expert on the card | 2 | 295-333 | 412-472 |
+| same | 3 | 428-429 | 442-446 |
+| same, the card held to 9 GB (most experts on the CPU) | 2 | 144-154 | 160-164 |
+| M5 Ultra (Metal), Qwen3.6 UD-Q2_K_XL | 2 | 140 | 173 |
+
+It pays most with two slots. With three a step reads the experts of six rows instead of three, and that takes back
+most of what the guesses save. It is off by default. Two chats at once through the server gave each the same text
+as alone (the RTX PRO 6000, greedy, the expert cache held still).
+
+Not there yet: `--batch-groups`, and the other options of the table below, which are the Strata project's engine's.
 
 ## Turning it on
 

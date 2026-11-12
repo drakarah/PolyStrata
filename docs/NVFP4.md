@@ -211,8 +211,89 @@ on the RTX 5090 with the host answering as that generation. On those builds `mmq
 HIP: the decode kernels use no CUDA-only intrinsics. The NVFP4 MMQ instance and the W4A8 unit are CUDA-only and
 guarded (`GGML_USE_HIP`). Neither was built for HIP here.
 
+## strata-poly: NVFP4 GGUFs
+
+strata-poly reads GGUFs whose matrices are llama.cpp's NVFP4 type (40): 64 values a block, E2M1 codes with a UE4M3
+scale for every 16. A file converted from NVIDIA's ModelOpt checkpoints also has each matrix's global scale beside
+it, `<name>.scale` for `<name>.weight`: one value, or one per expert for the routed experts. They are about 1e-4,
+too small for the blocks' E4M3 scales, and llama.cpp multiplies the product by them.
+
+- Decode: the kernels the Qwen3.8 engine decodes NVFP4 with (`iq_mmvq`, `vec_dot_nvfp4_q8_1`): the weights times
+  Q8_1 rows. `native_mmvq()` hands type 40 to them.
+- Prompt: llama.cpp's MMQ tiles. On every card they are W4A8 by default, the precision decode runs at
+  (`src/poly/mmq_nvfp4.cu`, built the way `mmq_nvfp4_w4a8.cu` above is). On an RTX 50 card (sm_120),
+  `STRATA_PREFILL_NVFP4=w4a4` takes llama.cpp's FP4 x FP4 tiles on its FP4 tensor cores instead: the instance is built
+  for 12.0a beside MXFP4's, and the rows' per-row float scale goes behind their FP4 blocks.
+- CPU experts: ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`.
+- Global scales: a dense matrix's on its product (`Engine::lin()`). A routed expert's gate and up scales go on their
+  products before the activation (`ExpertScales`, in each path's SwiGLU), and its down scale on its weight in the
+  token's sum. Down's scale on the hidden instead would leave it near 1e-5 before its 8-bit quantization (see "Where
+  the global scales go"). Only an NVFP4 tensor's `.scale` is read: Gemma 4's `ffn_down_exps.scale` is its own.
+- Not built: Metal (no NVFP4 kernels); HIP (no NVFP4 prompt product, the batch goes through the decode kernels; not
+  run here).
+
+Measured on lab-pro6000 (RTX PRO 6000 Blackwell Server Edition, sm_120, other users' jobs on the same card), with
+`WhiskyAKM/LFM2.5-24B-A2B-NVFP4-GGUF` (every matrix NVFP4, no global scales).
+
+`poly_expert_parity`: every product against a double-precision one over ggml's dequantized weights. All of them
+quantize their input to 8 bits, the Q6_K embedding of the same file included:
+
+| | relative error |
+| --- | ---: |
+| Q6_K embedding, decode and W4A8 MMQ | 1.23% |
+| NVFP4 matrices, decode kernel | 1.13-1.16% |
+| NVFP4 matrices, W4A8 MMQ | 1.13-1.16% |
+| NVFP4 experts (gate, up, SwiGLU, down), card and CPU | 1.7% |
+| NVFP4 matrices, W4A4 MMQ | 8.7-9.1% |
+
+The first 64 tokens after a 1,500-token prompt (the docs), teacher-forced on llama.cpp's greedy answer, against
+llama.cpp on the CPU (ggml 0.27). The answer's tokens are uncertain here (the first one at 9%), so the KL is larger
+than on a chat answer:
+
+| | same top token | mean KL |
+| --- | ---: | ---: |
+| strata-poly, W4A8 (default) | 56/64 | 0.054 |
+| strata-poly, experts on the CPU | 57/64 | 0.053 |
+| strata-poly, prompt through the decode kernels (`--prompt-batch 1`) | 59/64 | 0.056 |
+| strata-poly, W4A4 | 55/64 | 0.142 |
+| llama.cpp on the GPU (its prompt is FP4 x FP4 on this card) | 54/64 | 0.151 |
+
+Speed, every expert in VRAM, n-gram lookup off: a 7,500-token prompt 15,300 tokens/s with W4A8 and 16,900 with W4A4
+(+10%); 1,500 tokens 6,700 and 8,700-9,800. Decode is the same 411 tokens/s with either, since only the prompt's
+products change.
+
+`michaelw9999/Qwen3.6-35B-A3B-NVFP4-MTP-HQ` has global scales: NVFP4 experts, attention and `ssm_out`, an NVFP4 MTP
+layer, Q4_K ups in some layers, BF16 shared experts. Its whole experts come out at 1.6-2.0% in `poly_expert_parity`.
+The same 64 tokens against llama.cpp on the CPU (the answer is certain here, the first token at 99%):
+
+| | same top token | mean KL |
+| --- | ---: | ---: |
+| strata-poly, W4A8 (default) | 64/64 | 0.0015 |
+| strata-poly, experts on the CPU | 62/64 | 0.0019 |
+| strata-poly, prompt through the decode kernels | 63/64 | 0.0021 |
+| strata-poly, W4A4 | 62/64 | 0.0042 |
+| for comparison: UD-Q4_K_M, strata-poly against llama.cpp on the CPU | 64/64 | 0.0015 |
+
+llama.cpp at the pinned commit refuses this file: the 22 tensors of the MTP layer's scales are never read, and it
+counts that as an error. The reference here is that commit with the check off; it does not run the MTP layer.
+
+Its speed, on a card other jobs were using (single runs of the same setting differed by up to 2x; best of five):
+
+| Qwen3.6 | VRAM it may take | experts in VRAM | 7,500-token prompt | decode, 128 tokens |
+| --- | --- | ---: | ---: | ---: |
+| NVFP4-MTP-HQ, W4A8 | 28 GB (all of it) | 10,496 | 5,596 tokens/s | 274-295 tokens/s |
+| NVFP4-MTP-HQ, W4A4 | 28 GB | 10,496 | 5,590 | 294-303 |
+| UD-Q4_K_M | 28 GB | 10,496 | 5,976 | 304 |
+| NVFP4-MTP-HQ, W4A8 | 12 GB | 5,256 | 2,436 | 57-79 |
+| UD-Q4_K_M | 12 GB | 4,650 | 1,605 | 52-60 |
+
+W4A4 gains nothing measurable on Qwen3.6 and 10% on LFM2.5 (best of five: 15,232 and 16,785 tokens/s), at 2.6-2.8
+times the KL. The file is 2.2 GB smaller than UD-Q4_K_M, so a card that cannot hold either keeps more of its experts.
+
 ## Tests
 
+- `poly_expert_parity MODEL.gguf`: strata-poly's NVFP4 products against ggml's dequantized weights (with
+  `STRATA_PREFILL_NVFP4=w4a4` the MMQ ones are W4A4, and fail its bar, as above).
 - `nvfp4_expert_gpu_parity`: the decode kernels against ggml's reference.
 - `nvfp4_avx512_parity`: the CPU rows against ggml-cpu (with `--expert`: one whole expert).
 - `mmq_nvfp4_parity`: the prompt path's products against FP64 (with `--real`: rows dumped by `STRATA_DUMP_MOE_INPUT`).

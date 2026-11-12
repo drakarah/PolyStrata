@@ -18,6 +18,9 @@ PolyStrata, normalde bir sunucu gerektiren büyük yapay zekâ modellerini sıra
 modeller sohbet eder, kod yazar, uygulamaların ve kodlama ajanlarınla birlikte çalışır. Hiçbir veri bilgisayarından
 dışarı çıkmaz.
 
+[Linger](https://github.com/simplexai-labs/linger), bilgisayarında yerel olarak çalışan açık kaynaklı kişisel bir ajandır.
+Yerel modelleri PolyStrata üzerinde çalışır.
+
 İki motor üzerinde on iki model çalıştırır:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**: Windows veya Linux'ta, 12 GB ya da

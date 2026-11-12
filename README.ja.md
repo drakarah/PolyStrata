@@ -17,6 +17,9 @@ Qwen3.8-Flash-Next、GLM 5.3 Flash、DeepSeek V4 Flash、LFM2.5、Flint、Qwen3.
 PolyStrata は、ふつうはサーバーが必要な大きな AI モデルを普通の PC で動かします。チャットをしたり、コードを書いたり、
 アプリやコーディングエージェントと連携したりできます。データが PC の外に出ることはありません。
 
+[Linger](https://github.com/simplexai-labs/linger) は、あなたのコンピューターでローカルに動くオープンソースのパーソナルエージェントです。
+そのローカルモデルは PolyStrata で動いています。
+
 動かせるモデルは 12 個で、エンジンは 2 つです。
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)**：12 GB 以上の NVIDIA または AMD の

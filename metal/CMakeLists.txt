@@ -294,6 +294,12 @@ if(STRATA_METAL_POLY AND BUILD_TESTING)
     --tokens 1,2,3,4,5 --max-new 8 --max-context 128 --prompt-batch 32 --threads 2 --no-draft --batch 2 --check-batch 2 --kv q8_0)
   set_tests_properties(poly_tiny_qwen_q8 PROPERTIES LABELS "metal;gpu;poly;synthetic"
     RESOURCE_LOCK metal_gpu TIMEOUT 120 FIXTURES_REQUIRED tiny_qwen35moe)
+  # each sequence's draft block guesses in the batch, and the answers are still each one's alone
+  add_test(NAME poly_tiny_qwen_batch_mtp COMMAND strata-poly --model ${CMAKE_CURRENT_BINARY_DIR}/tiny-qwen35moe.gguf
+    --tokens 1,2,3,4,5 --max-new 8 --max-context 128 --prompt-batch 32 --threads 2 --window 2 --batch 2 --check-batch 2
+    --batch-mtp)
+  set_tests_properties(poly_tiny_qwen_batch_mtp PROPERTIES LABELS "metal;gpu;poly;synthetic"
+    RESOURCE_LOCK metal_gpu TIMEOUT 120 FIXTURES_REQUIRED tiny_qwen35moe)
 endif()
 
 if(STRATA_METAL_POLY AND BUILD_TESTING)
